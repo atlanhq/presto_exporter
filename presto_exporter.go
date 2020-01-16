@@ -201,7 +201,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		log.Errorf("%s", err)
 		return
 	}
-	log.Info("connectionString: ", e.connectionString)
 	db, err := sql.Open("presto", e.connectionString)
 	var data, err2 = db.Query("select * from nodes")
 	if err2 != nil {
@@ -218,7 +217,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 		results = append(results, dest)
 	}
-	log.Info("Results: ", results)
 	averageGeneralMemFree := int64(0)
 	averageGeneralMemMax := int64(0)
 	totalGeneralMemFree := int64(0)
@@ -237,7 +235,6 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			log.Errorf("%s", err2)
 			continue
 		}
-		log.Info(result)
 		body, err := ioutil.ReadAll(resp2.Body)
 		if err != nil {
 			log.Errorf("%s", err)
@@ -255,10 +252,10 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 		totalGeneralMemFree = totalGeneralMemFree + workerStatus.MemoryInfo.Pools.General.FreeBytes
 		totalGeneralMemMax = totalGeneralMemMax + workerStatus.MemoryInfo.Pools.General.MaxBytes
 		workerCount = workerCount + 1
-		log.Info("free: ", workerStatus.MemoryInfo.Pools.General.FreeBytes, "id: ", result[0])
-		log.Info("not free: ", workerStatus.MemoryInfo.Pools.General.MaxBytes, "id: ", result[0])
+		//log.Info("free: ", workerStatus.MemoryInfo.Pools.General.FreeBytes, "id: ", result[0])
+		//log.Info("not free: ", workerStatus.MemoryInfo.Pools.General.MaxBytes, "id: ", result[0])
 	}
-	log.Info("worker count ", workerCount)
+	//log.Info("worker count ", workerCount)
 	averageGeneralMemFree = totalGeneralMemFree / workerCount
 	averageGeneralMemMax = totalGeneralMemMax / workerCount
 	medianGeneralMemFree, _ := stats.Median(totalGeneralMemFreeArray)
