@@ -17,6 +17,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -26,6 +27,8 @@ import (
 	"io/ioutil"
 	"net/http"
 )
+import "github.com/montanaflynn/stats"
+import _ "github.com/prestodb/presto-go-client/presto"
 
 const (
 	namespace = "presto_cluster"
@@ -33,6 +36,7 @@ const (
 
 type Exporter struct {
 	uri              string
+	connectionString string
 	RunningQueries   float64 `json:"runningQueries"`
 	BlockedQueries   float64 `json:"blockedQueries"`
 	QueuedQueries    float64 `json:"queuedQueries"`
@@ -42,6 +46,17 @@ type Exporter struct {
 	TotalInputRows   float64 `json:"totalInputRows"`
 	TotalInputBytes  float64 `json:"totalInputBytes"`
 	TotalCpuTimeSecs float64 `json:"totalCpuTimeSecs"`
+}
+
+type WorkerStatus struct {
+	MemoryInfo struct{
+		Pools struct{
+			General struct{
+				FreeBytes int64 `json:"freeBytes"`
+				MaxBytes  int64 `json:"maxBytes"`
+			} `json:"general"`
+		} `json:"pools"`
+	} `json:"memoryInfo"`
 }
 
 var (
@@ -90,6 +105,40 @@ var (
 		"Total cpu time of the presto cluster.",
 		nil, nil,
 	)
+
+	averageGeneralPoolMemFree = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "average_general_mem_free"),
+		"Average general pool free memory in presto cluster",
+		nil, nil,
+	)
+
+	averageGeneralPoolMemMax = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "average_general_mem_max"),
+		"Average general pool max memory in presto cluster",
+		nil, nil,
+	)
+
+	totalGeneralPoolMemFree = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "total_general_mem_free"),
+		"total general pool free memory in presto cluster",
+		nil, nil,
+	)
+
+	totalGeneralPoolMemMax = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "total_general_mem_max"),
+		"total general pool max memory in presto cluster",
+		nil, nil,
+	)
+	totalWorkers = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "total_workers"),
+		"total workers in presto cluster",
+		nil, nil,
+	)
+	medianGeneralPoolMemFree = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "", "median_general_mem_free"),
+		"median general pool free memory in presto cluster",
+		nil, nil,
+	)
 )
 
 // Describe implements the prometheus.Collector interface.
@@ -103,6 +152,12 @@ func (e Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- totalInputRows
 	ch <- totalInputBytes
 	ch <- totalCpuTimeSecs
+	ch <- averageGeneralPoolMemMax
+	ch <- averageGeneralPoolMemFree
+	ch <- totalGeneralPoolMemFree
+	ch <- totalGeneralPoolMemMax
+	ch <- totalWorkers
+	ch <- medianGeneralPoolMemFree
 }
 
 func main() {
@@ -111,6 +166,7 @@ func main() {
 		metricsPath   = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
 		opts          = Exporter{}
 	)
+	kingpin.Flag("web.connUri", "connection string").Default("http://user@localhost:8080?catalog=default&schema=test").StringVar(&opts.connectionString)
 	kingpin.Flag("web.url", "Presto cluster address.").Default("http://localhost:8080/v1/cluster").StringVar(&opts.uri)
 
 	log.AddFlags(kingpin.CommandLine)
@@ -121,7 +177,7 @@ func main() {
 	log.Infoln("Starting presto_exporter", version.Info())
 	log.Infoln("Build context", version.BuildContext())
 
-	prometheus.MustRegister(&Exporter{uri: opts.uri})
+	prometheus.MustRegister(&Exporter{uri: opts.uri, connectionString: opts.connectionString})
 
 	http.Handle(*metricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -140,11 +196,73 @@ func main() {
 
 // Collect implements the prometheus.Collector interface.
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
-	resp, err := http.Get(e.uri)
+	resp, err := http.Get(e.uri + "cluster")
 	if err != nil {
 		log.Errorf("%s", err)
 		return
 	}
+	log.Info("connectionString: ", e.connectionString)
+	db, err := sql.Open("presto", e.connectionString)
+	var data, err2 = db.Query("select * from nodes")
+	if err2 != nil {
+		log.Error("Can't get node information")
+	}
+
+	var results [][]string
+
+	for data.Next() {
+		dest := make([]string, 5)
+		err := data.Scan(&dest[0], &dest[1], &dest[2], &dest[3], &dest[4])
+		if err != nil {
+			log.Error(err)
+		}
+		results = append(results, dest)
+	}
+	log.Info("Results: ", results)
+	averageGeneralMemFree := int64(0)
+	averageGeneralMemMax := int64(0)
+	totalGeneralMemFree := int64(0)
+	totalGeneralMemMax := int64(0)
+	var totalGeneralMemFreeArray []float64
+	workerCount := int64(0)
+	for _, result := range results {
+		if result[3] == "true" {
+			continue
+		}
+		if result[4] == "shutting_down" {
+			continue
+		}
+		resp2, err2 := http.Get(e.uri + "worker/" + result[0] + "/status")
+		if err2 != nil {
+			log.Errorf("%s", err2)
+			continue
+		}
+		log.Info(result)
+		body, err := ioutil.ReadAll(resp2.Body)
+		if err != nil {
+			log.Errorf("%s", err)
+			continue
+		}
+
+		workerStatus := WorkerStatus{}
+		err3 := json.Unmarshal(body, &workerStatus)
+		if err3 != nil {
+			log.Errorf("%s", err)
+			log.Error(body)
+			continue
+		}
+		totalGeneralMemFreeArray = append(totalGeneralMemFreeArray, float64(totalGeneralMemFree))
+		totalGeneralMemFree = totalGeneralMemFree + workerStatus.MemoryInfo.Pools.General.FreeBytes
+		totalGeneralMemMax = totalGeneralMemMax + workerStatus.MemoryInfo.Pools.General.MaxBytes
+		workerCount = workerCount + 1
+		log.Info("free: ", workerStatus.MemoryInfo.Pools.General.FreeBytes, "id: ", result[0])
+		log.Info("not free: ", workerStatus.MemoryInfo.Pools.General.MaxBytes, "id: ", result[0])
+	}
+	log.Info("worker count ", workerCount)
+	averageGeneralMemFree = totalGeneralMemFree / workerCount
+	averageGeneralMemMax = totalGeneralMemMax / workerCount
+	medianGeneralMemFree, _ := stats.Median(totalGeneralMemFreeArray)
+
 	if resp.StatusCode != 200 {
 		log.Errorf("%s", err)
 		return
@@ -171,4 +289,10 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(totalInputRows, prometheus.GaugeValue, e.TotalInputRows)
 	ch <- prometheus.MustNewConstMetric(totalInputBytes, prometheus.GaugeValue, e.TotalInputBytes)
 	ch <- prometheus.MustNewConstMetric(totalCpuTimeSecs, prometheus.GaugeValue, e.TotalCpuTimeSecs)
+	ch <- prometheus.MustNewConstMetric(averageGeneralPoolMemFree, prometheus.GaugeValue, float64(averageGeneralMemFree))
+	ch <- prometheus.MustNewConstMetric(averageGeneralPoolMemMax, prometheus.GaugeValue, float64(averageGeneralMemMax))
+	ch <- prometheus.MustNewConstMetric(totalGeneralPoolMemFree, prometheus.GaugeValue, float64(totalGeneralMemFree))
+	ch <- prometheus.MustNewConstMetric(totalGeneralPoolMemMax, prometheus.GaugeValue, float64(totalGeneralMemMax))
+	ch <- prometheus.MustNewConstMetric(totalWorkers, prometheus.GaugeValue, float64(workerCount))
+	ch <- prometheus.MustNewConstMetric(medianGeneralPoolMemFree, prometheus.GaugeValue, medianGeneralMemFree)
 }
