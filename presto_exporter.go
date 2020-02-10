@@ -248,7 +248,7 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 			log.Error(body)
 			continue
 		}
-		totalGeneralMemFreeArray = append(totalGeneralMemFreeArray, float64(totalGeneralMemFree))
+		totalGeneralMemFreeArray = append(totalGeneralMemFreeArray, float64(workerStatus.MemoryInfo.Pools.General.FreeBytes))
 		totalGeneralMemFree = totalGeneralMemFree + workerStatus.MemoryInfo.Pools.General.FreeBytes
 		totalGeneralMemMax = totalGeneralMemMax + workerStatus.MemoryInfo.Pools.General.MaxBytes
 		workerCount = workerCount + 1
